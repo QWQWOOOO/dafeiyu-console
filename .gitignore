@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# PyInstaller
+tools/build/
+tools/dist/
+tools/buildenv/
+*.spec.bak
+
+# 运行时数据（不要提交）
+app/
+cache/
+settings.json
+paths.json
+required_plugins.json
+*.log
+
+# Edge 内嵌配置
+tools/_edge_profile/
+tools/tools/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
