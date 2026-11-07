@@ -59,7 +59,7 @@ if runtime_src.exists():
 else:
     print("[4/5] 警告：没有找到 runtime\\python312，包里将缺少内置 Python")
 
-zip_path = HERE / "dist" / f"{name}-win64.zip"
+zip_path = HERE / "dist" / f"DafeiyuConsole-v{ver}-win64.zip"
 print("[5/5] 打包", zip_path)
 if zip_path.exists():
     zip_path.unlink()

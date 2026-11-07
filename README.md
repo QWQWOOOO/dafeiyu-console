@@ -37,7 +37,7 @@
 
 ### 下载与使用
 
-到 [Releases](../../releases) 下载 `大肥鱼控制台-vX.Y.Z-win64.zip`，解压到**英文路径**（例如 `D:\DafeiyuBot`，不要放 `C:\Program Files`），双击 `大肥鱼控制台.exe`，跟着新手引导走即可。
+到 [Releases](../../releases) 下载 `DafeiyuConsole-vX.Y.Z-win64.zip`，解压到**英文路径**（例如 `D:\DafeiyuBot`，不要放 `C:\Program Files`），双击 `大肥鱼控制台.exe`，跟着新手引导走即可。
 
 详细步骤见 [docs/使用说明.txt](docs/使用说明.txt)。
 
@@ -110,7 +110,7 @@ docs/                截图与使用说明
 
 ### Download & run
 
-Grab `大肥鱼控制台-vX.Y.Z-win64.zip` from [Releases](../../releases), extract to an **ASCII path** (e.g. `D:\DafeiyuBot`, not `C:\Program Files`), then double-click `大肥鱼控制台.exe` and follow the wizard.
+Grab `DafeiyuConsole-vX.Y.Z-win64.zip` from [Releases](../../releases), extract to an **ASCII path** (e.g. `D:\DafeiyuBot`, not `C:\Program Files`), then double-click `大肥鱼控制台.exe` and follow the wizard.
 
 ### Build from source
 
