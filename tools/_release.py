@@ -39,7 +39,7 @@ if out.exists():
 out.mkdir(parents=True)
 
 shutil.copy2(exe, out / "大肥鱼控制台.exe")
-for doc in ("CHANGELOG.md", "使用说明.txt"):
+for doc in ("CHANGELOG.md", "使用说明.txt", "更新说明.md"):
     shutil.copy2(DOCS / doc, out / doc)
 shutil.copy2(ROOT / "README.md", out / "README.md")
 shutil.copy2(ROOT / "LICENSE", out / "LICENSE")

@@ -14,6 +14,7 @@ from pathlib import Path
 
 import bot_ctl as core
 import dashboard_view
+import i18n
 
 THEMES = {
     "light": {
@@ -178,6 +179,18 @@ def _round(cv, x1, y1, x2, y2, r, **kw):
     return cv.create_polygon(pts, smooth=True, splinesteps=24, **kw)
 
 
+class _Canvas(tk.Canvas):
+    """Canvas 子类：所有 create_text 的文本都过一遍 i18n，静态/带变量都覆盖。"""
+
+    def create_text(self, *args, **kwargs):
+        if "text" in kwargs:
+            try:
+                kwargs["text"] = i18n.tr(str(kwargs["text"]))
+            except Exception:
+                pass
+        return super().create_text(*args, **kwargs)
+
+
 class Panel:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
@@ -187,6 +200,7 @@ class Panel:
         self.hover: str | None = None
         self._fresh_install = not core.SETTINGS_FILE.exists()
         self.settings = core.load_settings()
+        i18n.load(self.settings)
         self._apply_fonts()
         self._set_tab = "general"
         apply_theme("dark" if self._theme_pref() == "dark" else "light")
@@ -203,6 +217,8 @@ class Panel:
         self._astrbot_web = False
         self._health: dict = {}
         self._plugins: list = []
+        self._entities = None
+        self._scanning = False
         self._plugin_loading = False
         self._plugin_page = 0
         self._plugin_warned = False
@@ -214,8 +230,10 @@ class Panel:
         self._nav_t: float = 1.0
         self._nav_seq: int = 0
         self._theme_seq: int = 0
+        self._slide_job = None
+        self._tray_job = None
 
-        root.title(f"大肥鱼控制台 v{core.APP_VERSION}")
+        root.title(i18n.t("大肥鱼控制台 v{0}", core.APP_VERSION))
         try:
             _ico = Path(core.APP_DIR) / "tools" / "bot.ico"
             if _ico.exists():
@@ -226,7 +244,7 @@ class Panel:
         sc = self.scale()
         root.minsize(round(900 * sc), round(620 * sc))
         root.geometry(self._initial_geometry(sc))
-        self.cv = tk.Canvas(root, bg=BG, highlightthickness=0, bd=0)
+        self.cv = _Canvas(root, bg=BG, highlightthickness=0, bd=0)
         self.cv.pack(fill="both", expand=True)
 
         self.cv.bind("<Configure>", self._schedule_redraw)
@@ -236,11 +254,28 @@ class Panel:
 
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.bind("<Unmap>", self._on_unmap)
+        for _seq in ("<Left>", "<Right>", "<Up>", "<Down>", "<Return>",
+                     "<KP_Enter>", "<space>", "<Escape>",
+                     "<Key-1>", "<Key-2>", "<Key-3>", "<Key-4>"):
+            root.bind(_seq, self._on_keypress)
+        try:
+            self.cv.focus_set()
+        except Exception:
+            pass
 
-        if self._fresh_install and not self.settings.get("onboarded"):
+        self._has_lang = bool(self.settings.get("lang"))
+        if not self._has_lang:
+            # 首次启动（或升级后第一次启动）先选界面语言
             self.page = "guide"
+            self._guide_step = -1
+            self.root.after(350, self._scan_entities)
+        elif not self.settings.get("onboarded"):
+            # 选过语言但还没做完新手引导：继续引导（选语言时已写过 settings.json）
+            self.page = "guide"
+            self._guide_step = 0
+        else:
+            self._guide_step = 0
         self.log("就绪 · 改完插件点「热重启 AstrBot」即可生效")
-        self._guide_step = 0
         self._comp_busy: set[str] = set()
         self._comp_pct: dict[str, int] = {}
         self._comp_cancel: dict[str, object] = {}
@@ -255,6 +290,7 @@ class Panel:
         self.root.after(120, self._apply_frame)
         self.root.after(400, self._tick_dash)
         self.root.after(1500, self._startup_check)
+        self.root.after(250, lambda: self.cv.focus_set())
 
     # ------------------------------------------------------------ 基础
     def _apply_frame(self) -> None:
@@ -375,12 +411,11 @@ class Panel:
         self._schedule_redraw()
 
     def _schedule_redraw(self, _e=None) -> None:
+        # 节流而不是防抖：拖动窗口时 Configure 会连续触发，防抖会把重绘一直
+        # 往后推，拖拽过程中界面就停在旧尺寸；这里保证最多 16ms 重绘一帧。
         if self._redraw_job:
-            try:
-                self.root.after_cancel(self._redraw_job)
-            except Exception:
-                pass
-        self._redraw_job = self.root.after(60, self.redraw)
+            return
+        self._redraw_job = self.root.after(16, self.redraw)
 
     # ------------------------------------------------------------ 绘制
     def redraw(self) -> None:
@@ -389,6 +424,12 @@ class Panel:
 
         _t0 = _time.perf_counter()
         self._redraw_job = None
+        if self._slide_job:
+            try:
+                self.root.after_cancel(self._slide_job)
+            except Exception:
+                pass
+            self._slide_job = None
         cv = self.cv
         cv.delete("all")
         self.hits = []
@@ -461,13 +502,26 @@ class Panel:
         except Exception:
             pass
 
-    def _text(self, x, y, txt, size, color=TEXT, anchor="nw", weight="normal", family=None):
+    def _text(self, x, y, txt, size, color=TEXT, anchor="nw", weight="normal",
+              family=None, width=None):
         fam = family or FONT_FAMILY
         px = max(7, round(size * self.s * FONT_SCALE))
-        return self.cv.create_text(
-            x, y, text=txt, anchor=anchor, fill=color,
-            font=(fam, -px, weight),
-        )
+        kw = dict(text=txt, anchor=anchor, fill=color,
+                  font=(fam, -px, weight))
+        if width:
+            kw["width"] = width
+        return self.cv.create_text(x, y, **kw)
+
+    def _text_w(self, txt, size, weight="normal", family="Segoe UI Variable Text") -> float:
+        """按当前 DPI/字号估算译文宽度，用于自适应按钮和排版。"""
+        try:
+            from tkinter import font as _font
+
+            f = _font.Font(family=family, size=-max(7, round(size * self.s)),
+                           weight=weight)
+            return float(f.measure(i18n.tr(txt)))
+        except Exception:
+            return len(i18n.tr(txt)) * size * 0.9
 
     def _card(self, x1, y1, x2, y2, r=12):
         """白卡片：极淡的投影 + 细边，做出“浮在底板上”的层次。"""
@@ -516,6 +570,7 @@ class Panel:
         if b:
             self._add_hit(*b, cb)
             self.hits[-1].update({"link_text": item})
+        return b
 
     # ------------------------------------------------------------ 主页面
     def _draw_bg(self, W, H, s) -> None:
@@ -530,7 +585,7 @@ class Panel:
             return
         key = (path, W, H)
         if getattr(self, "_bg_key", None) == key and getattr(self, "_bg_photo", None) is not None:
-            self.cv.create_image(0, 0, image=self._bg_photo, anchor="nw")
+            self.cv.create_image(0, 0, image=self._bg_photo, anchor="nw", tags=("bg",))
             return
         try:
             img = Image.open(path).convert("RGB")
@@ -544,15 +599,16 @@ class Panel:
             img = Image.blend(img, white, 0.74)
             self._bg_photo = ImageTk.PhotoImage(img)
             self._bg_key = key
-            self.cv.create_image(0, 0, image=self._bg_photo, anchor="nw")
+            self.cv.create_image(0, 0, image=self._bg_photo, anchor="nw", tags=("bg",))
         except Exception:
             self._bg_photo = None
 
     def _pick_bg(self) -> None:
         from tkinter import filedialog
         path = filedialog.askopenfilename(
-            title="选一张背景图片",
-            filetypes=[("图片", "*.png *.jpg *.jpeg *.bmp *.webp"), ("所有文件", "*.*")],
+            title=i18n.tr("选一张背景图片"),
+            filetypes=[(i18n.tr("图片"), "*.png *.jpg *.jpeg *.bmp *.webp"),
+                       (i18n.tr("所有文件"), "*.*")],
         )
         if not path:
             return
@@ -660,19 +716,29 @@ class Panel:
         avail = int((log_bottom - log_top - round(38 * s)) // line_h)
         shown = self.logs[-max(1, avail):] if avail > 0 else []
         ly = log_top + round(38 * s)
+        log_right = W - m - round(14 * s)
         for line in shown:
-            cv.create_text(m + round(14 * s), ly, text=line[:220], anchor="nw",
-                           fill=SUB, font=("Cascadia Mono", -round(10 * s)))
+            item = cv.create_text(m + round(14 * s), ly, text=line, anchor="nw",
+                                  fill=SUB, font=("Cascadia Mono", -round(10 * s)))
+            b = cv.bbox(item)
+            cut = cv.itemcget(item, "text")
+            while b and b[2] > log_right and len(cut) > 8:
+                cut = cut[:-max(1, len(cut) // 8)]
+                cv.itemconfigure(item, text=cut.rstrip() + "…")
+                b = cv.bbox(item)
             ly += line_h
         if not shown:
             cv.create_text(m + round(14 * s), ly, text="还没有日志", anchor="nw",
                            fill=MUTED, font=("Segoe UI Variable Text", -round(10.5 * s)))
 
-        # 底部链接
+        # 底部链接：按实际文字宽度排布，翻译变长也不会挤在一起
         fy = H - round(28 * s)
-        self._link(m, fy, "看日志", self.open_logs)
-        self._link(m + round(74 * s), fy, "打开目录", self.open_dir)
-        self._link(m + round(164 * s), fy, "复制状态", self.copy_status)
+        lx = m
+        for label, cb in (("看日志", self.open_logs),
+                          ("打开目录", self.open_dir),
+                          ("复制状态", self.copy_status)):
+            b = self._link(lx, fy, label, cb)
+            lx = (b[2] if b else lx + round(60 * s)) + round(24 * s)
 
     def _chip(self, x1, y1, x2, y2, label, color):
         """小号状态胶囊。"""
@@ -704,6 +770,8 @@ class Panel:
         item_h = round(42 * s)
         nav_h = round(20 * s) + (item_h + round(3 * s)) * len(self.SETTING_TABS)
         self._card(m, top, nav_x2, top + nav_h)
+        self._text(m + round(4 * s), top + nav_h + round(12 * s),
+                   "↑ ↓ 切换分类 · Esc 返回", 9.5, MUTED)
         keys = [k for k, _, _ in self.SETTING_TABS]
         cur_i = keys.index(self._set_tab) if self._set_tab in keys else 0
         prev_i = keys.index(self._nav_prev) if self._nav_prev in keys else None
@@ -769,25 +837,33 @@ class Panel:
     def _open_guide(self) -> None:
         self.page = "guide"
         self._guide_step = 0
-        self._schedule_redraw()
+        self.redraw()
+        self._slide_in(1)
 
     def _guide_go(self, step: int) -> None:
-        self._guide_step = max(0, min(len(self.GUIDE_STEPS) - 1, step))
-        self._schedule_redraw()
+        step = max(0, min(len(self.GUIDE_STEPS) - 1, step))
+        if step == self._guide_step:
+            return
+        direction = 1 if step > self._guide_step else -1
+        self._guide_step = step
+        self.redraw()
+        self._slide_in(direction)
 
     def _guide_finish(self) -> None:
         self.settings["onboarded"] = True
         core.save_settings(self.settings)
         self.page = "main"
         self.log("新手引导已完成，可以点「启动」了")
-        self._schedule_redraw()
+        self.redraw()
+        self._slide_in(1)
 
     def _guide_skip(self) -> None:
         self.settings["onboarded"] = True
         core.save_settings(self.settings)
         self.page = "main"
         self.log("已跳过新手引导，之后可在「设置 → 关于」里重新打开")
-        self._schedule_redraw()
+        self.redraw()
+        self._slide_in(1)
 
     def _guide_copy(self, text: str) -> None:
         try:
@@ -806,6 +882,9 @@ class Panel:
 
     def _draw_guide(self, W, H, m, s) -> None:
         cv = self.cv
+        if self._guide_step < 0:
+            self._draw_lang_welcome(W, H, m, s)
+            return
         self._text(m, m - 2, "新手引导", 19, TEXT, weight="bold",
                    )
         self._text(m, m + round(26 * s),
@@ -856,6 +935,8 @@ class Panel:
             self._add_hit(m + round(8 * s), y, nav_x2 - round(8 * s), y + item_h,
                           lambda k=i: self._guide_go(k))
 
+        self._text(m + round(4 * s), top + nav_h + round(12 * s),
+                   "← → 切换步骤 · Enter 继续", 9.5, MUTED)
         x1 = nav_x2 + round(14 * s)
         x2 = W - m
         self._card(x1, top, x2, bottom)
@@ -884,6 +965,144 @@ class Panel:
                          x2 - round(120 * s) - round(8 * s), by + bh2,
                          "上一步", "secondary",
                          lambda: self._guide_go(self._guide_step - 1), s)
+
+    # ------------------------------------------------------------ 首次启动：选语言
+    def _draw_lang_welcome(self, W, H, m, s) -> None:
+        self._text(m, m - 2, "欢迎使用大肥鱼控制台", 19, TEXT, weight="bold")
+        self._text(m, m + round(26 * s),
+                   "先选一个界面语言：控制台、新手引导和设置都会用它显示。",
+                   10.5, MUTED)
+
+        top = m + round(58 * s)
+        bottom = H - round(22 * s)
+        self._card(m, top, W - m, bottom)
+        tx = m + round(28 * s)
+        self._text(tx, top + round(22 * s), "选择界面语言", 15, TEXT, weight="bold")
+        self._text(tx, top + round(48 * s),
+                   "只影响控制台自己的显示，不会修改 AstrBot / SnowLuma 或机器人配置。",
+                   10.5, SUB)
+
+        gap = round(12 * s)
+        bw = ((W - 2 * m) - round(56 * s) - gap * 3) / 4
+        bh = round(74 * s)
+        by = top + round(78 * s)
+        cur = i18n.get_lang()
+        for i, (code, name) in enumerate(i18n.LANGS):
+            bx = tx + i * (bw + gap)
+            on = code == cur
+            _round(self.cv, bx, by, bx + bw, by + bh, round(12 * s),
+                   fill=ACCENT if on else BG,
+                   outline="" if on else BORDER, width=0 if on else 1)
+            self._text(bx + bw / 2, by + round(23 * s), name, 15,
+                       ON_ACCENT if on else TEXT, anchor="center", weight="bold")
+            self._text(bx + bw / 2, by + round(48 * s), code, 9.5,
+                       ON_ACCENT if on else MUTED, anchor="center")
+            self._add_hit(bx, by, bx + bw, by + bh,
+                          lambda c=code: self._lang_choose(c))
+
+        # 机器人实体：只读扫描，仅记录到控制台，不动机器人文件
+        ey = by + bh + round(28 * s)
+        self._text(tx, ey, "已检测到的机器人实体", 12.5, TEXT, weight="bold")
+        self._link(W - m - round(28 * s), ey + round(1 * s), "重新扫描",
+                   self._scan_entities, anchor="ne")
+        ents = self._entities
+        if ents is None:
+            self._text(tx, ey + round(26 * s), "正在扫描已登录的 QQ 机器人…", 10.5, MUTED)
+        elif not ents:
+            self._text(tx, ey + round(26 * s),
+                       "没有发现已登录的机器人；可以稍后在 SnowLuma 里登录，再回来扫描。",
+                       10.5, MUTED)
+        else:
+            for i, ent in enumerate(ents[:3]):
+                ry = ey + round(28 * s) + i * round(24 * s)
+                if ent.get("source") == "SnowLuma":
+                    label = f"QQ {ent.get('uin')} · SnowLuma"
+                else:
+                    label = f"{ent.get('platform')} · AstrBot"
+                self._text(tx, ry, label, 10.5, SUB)
+            if len(ents) > 3:
+                self._text(tx, ey + round(28 * s) + 3 * round(24 * s),
+                           f"共 {len(ents)} 个", 10.5, MUTED)
+            self._text(tx, ey + round(28 * s) + min(len(ents), 3) * round(24 * s),
+                       "这些记录只保存在控制台里，不会修改机器人文件。", 9.5, MUTED)
+
+        btn_y = bottom - round(48 * s)
+        self._button(W - m - round(28 * s) - round(96 * s), btn_y,
+                     W - m - round(28 * s), btn_y + round(34 * s),
+                     "继续", "primary", self._lang_continue, s)
+        self._text(W - m - round(28 * s), btn_y - round(6 * s),
+                   "← → 选择语言 · Enter 继续", 9.5, MUTED, anchor="se")
+        self._link(tx, btn_y + round(10 * s), "跳过，使用简体中文", self._lang_skip)
+
+    def _lang_choose(self, code: str) -> None:
+        if code not in i18n.VALID_LANGS:
+            return
+        i18n.set_lang(code)
+        self.settings["lang"] = code
+        self._has_lang = True
+        core.save_settings(self.settings)
+        self._apply_lang_chrome()
+        self.redraw()
+
+    def _lang_continue(self) -> None:
+        if not self.settings.get("lang"):
+            self._lang_choose(i18n.DEFAULT_LANG)
+        if self.settings.get("onboarded"):
+            self.page = "main"
+        else:
+            self.page = "guide"
+            self._guide_step = 0
+        self.redraw()
+        self._slide_in(1)
+
+    def _lang_skip(self) -> None:
+        self._lang_choose(i18n.DEFAULT_LANG)
+        self._lang_continue()
+
+    def _set_lang(self, value: str) -> None:
+        self._lang_choose(value)
+        self.log(i18n.t("界面语言已切换为 {0}", i18n.lang_name(value)))
+
+    def _apply_lang_chrome(self) -> None:
+        try:
+            self.root.title(i18n.t("大肥鱼控制台 v{0}", core.APP_VERSION))
+        except Exception:
+            pass
+        # 连续按方向键切语言时，托盘菜单重建做一下防抖，避免卡顿
+        if self._tray_job:
+            try:
+                self.root.after_cancel(self._tray_job)
+            except Exception:
+                pass
+        self._tray_job = self.root.after(120, self._rebuild_tray)
+
+    def _scan_entities(self) -> None:
+        if self._scanning:
+            return
+        self._scanning = True
+        if self.page == "guide" and self._guide_step < 0:
+            self._schedule_redraw()
+
+        def work() -> None:
+            try:
+                items = core.scan_bot_entities()
+            except Exception:
+                items = []
+
+            def done() -> None:
+                self._scanning = False
+                self._entities = items
+                try:
+                    self.settings["bot_entities"] = items
+                    self.settings["bot_scan_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                    core.save_settings(self.settings)
+                except Exception:
+                    pass
+                self._schedule_redraw()
+
+            self._post(done)
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _guide_body(self, x1, y1, x2, y2, s) -> tuple[float, float, float]:
         tx = x1 + round(22 * s)
@@ -1164,23 +1383,36 @@ class Panel:
         self._schedule_redraw()
 
     def _settings_appearance(self, x1, y1, x2, y2, s) -> None:
+        # 语言
+        lang_h = round(74 * s)
+        self._card(x1, y1, x2, y1 + lang_h)
+        self._text(x1 + round(18 * s), y1 + round(13 * s), "语言", 13, TEXT, weight="bold")
+        self._text(x2 - round(18 * s), y1 + round(15 * s),
+                   "只影响控制台界面，切换后立即生效", 10, MUTED, anchor="ne")
+        lang_opts = [(code, name) for code, name in i18n.LANGS]
+        self._segmented(x1 + round(18 * s), y1 + round(38 * s),
+                        min(round(440 * s), (x2 - x1) - round(36 * s)),
+                        round(28 * s), lang_opts, i18n.get_lang(),
+                        self._set_lang, s, "lang")
+
         # 主题
+        theme_y = y1 + lang_h + round(12 * s)
         card_h = round(128 * s)
-        self._card(x1, y1, x2, y1 + card_h)
-        self._text(x1 + round(18 * s), y1 + round(16 * s), "主题", 13, TEXT, weight="bold")
-        self._text(x1 + round(18 * s), y1 + round(38 * s),
+        self._card(x1, theme_y, x2, theme_y + card_h)
+        self._text(x1 + round(18 * s), theme_y + round(16 * s), "主题", 13, TEXT, weight="bold")
+        self._text(x1 + round(18 * s), theme_y + round(38 * s),
                    "深色模式适合夜里用，跟随系统会跟着 Windows 的应用主题走。",
                    10.5, MUTED)
         opts = [("light", "浅色"), ("dark", "深色"), ("system", "跟随系统")]
         bx = x1 + round(18 * s)
-        by = y1 + round(64 * s)
+        by = theme_y + round(64 * s)
         seg_h = round(36 * s)
         seg_w = min(round(360 * s), (x2 - x1) - round(36 * s))
         self._segmented(bx, by, seg_w, seg_h, opts, self._theme_pref(),
                         self._set_theme, s, "theme")
 
         # 字体
-        font_y = y1 + card_h + round(16 * s)
+        font_y = theme_y + card_h + round(12 * s)
         font_h = round(146 * s)
         self._card(x1, font_y, x2, font_y + font_h)
         self._text(x1 + round(18 * s), font_y + round(16 * s), "字体", 13, TEXT, weight="bold")
@@ -1228,7 +1460,7 @@ class Panel:
         self._card(x1, y1, x2, y1 + block_h)
         self._text(x1 + round(18 * s), y1 + round(16 * s), "关闭窗口时", 13, TEXT,
                    weight="bold")
-        opts = [("ask", "每次询问"), ("tray", "最小化到后台"), ("quit", "直接退出")]
+        opts = [("ask", "每次询问"), ("tray", "最小化到托盘"), ("quit", "直接退出")]
         bx = x1 + round(18 * s)
         by = y1 + round(46 * s)
         seg_w = min(round(520 * s), (x2 - x1) - round(36 * s))
@@ -1242,9 +1474,15 @@ class Panel:
     def _settings_about(self, x1, y1, x2, y2, s) -> None:
         info = core.release_info()
         repo = str(info.get("repo") or "")
+        name = str(info.get("name") or "大肥鱼控制台")
+        version = str(info.get("version") or "0.0.0")
+        ver_txt = (i18n.t("大肥鱼控制台 v{0}", version) if name == "大肥鱼控制台"
+                   else f"{name} v{version}")
+        build = str(info.get("build") or "")
+        if build:
+            ver_txt += i18n.t(" · {0} 构建", build)
         rows = [
-            ("版本", f"{info.get('name', '大肥鱼控制台')} v{info.get('version', '0.0.0')}"
-                     + (f" · {info.get('build')} 构建" if info.get("build") else "")),
+            ("版本", ver_txt),
             ("开源协议", str(info.get("license") or "MIT")
                      + (f" · {info.get('author')}" if info.get("author") else "")),
             ("开源仓库", repo or "未配置（在 tools/release.json 里填 repo 即可）"),
@@ -1271,24 +1509,29 @@ class Panel:
                               lambda u=repo: self._open_url(u))
 
         by = y1 + card_h + round(16 * s)
-        bw = round(120 * s)
         gap = round(10 * s)
-        self._button(x1, by, x1 + bw * 1.25, by + round(32 * s), "打开仓库",
-                     "primary", lambda: self._open_url(repo), s)
-        self._button(x1 + bw * 1.25 + gap, by, x1 + bw * 2.25 + gap,
-                     by + round(32 * s), "复制仓库地址", "secondary",
-                     lambda: self._guide_copy(repo), s)
+
+        def fit_btn(x, y, label, kind, cb):
+            size = 13 if kind == "primary" else 12.5
+            bw = max(round(84 * s), self._text_w(label, size, "bold" if kind == "primary"
+                                                 else "normal") + round(30 * s))
+            self._button(x, y, x + bw, y + round(32 * s), label, kind, cb, s)
+            return bw
+
+        bx = x1
+        bx += fit_btn(bx, by, "打开仓库", "primary", lambda: self._open_url(repo)) + gap
+        fit_btn(bx, by, "复制仓库地址", "secondary", lambda: self._guide_copy(repo))
+
         by2 = by + round(42 * s)
-        self._button(x1, by2, x1 + bw, by2 + round(32 * s), "打开日志目录",
-                     "secondary", self.open_dir, s)
-        self._button(x1 + bw + gap, by2, x1 + bw * 2 + gap, by2 + round(32 * s),
-                     "插件体检", "secondary", self._open_plugins, s)
-        self._button(x1 + bw * 2 + gap * 2, by2, x1 + bw * 3 + gap * 2,
-                     by2 + round(32 * s), "新手引导", "secondary",
-                     self._open_guide, s)
+        bx = x1
+        for label, cb in (("打开日志目录", self.open_dir),
+                          ("插件体检", self._open_plugins),
+                          ("新手引导", self._open_guide)):
+            bx += fit_btn(bx, by2, label, "secondary", cb) + gap
+
         self._text(x1, by2 + round(46 * s),
                    "面板、主题、插件清单都放在运行目录里，换机器时整个目录拷走即可。",
-                   10.5, MUTED)
+                   10.5, MUTED, width=x2 - x1)
 
     def _open_url(self, url: str) -> None:
         import webbrowser
@@ -1312,6 +1555,103 @@ class Panel:
                 self.root.after(16, tick)
 
         tick()
+
+    def _slide_in(self, direction: int = 1, dist: float = 26) -> None:
+        """过场：整页从一侧轻滑入。只做画布位移，不重绘，所以能稳定跑满帧。"""
+        if self._slide_job:
+            try:
+                self.root.after_cancel(self._slide_job)
+            except Exception:
+                pass
+            self._slide_job = None
+        s = self.scale()
+        off = round(dist * s) * (1 if direction >= 0 else -1)
+        try:
+            # 背景图不参与位移，否则滑动时窗口边缘会露出底色
+            targets = [i for i in self.cv.find_all()
+                       if "bg" not in self.cv.gettags(i)]
+        except Exception:
+            return
+        if not targets:
+            return
+        for i in targets:
+            self.cv.move(i, off, 0)
+        t0 = time.time()
+        dur = 0.17
+        prev = float(off)
+
+        def tick():
+            p = min(1.0, (time.time() - t0) / dur)
+            e = 1 - (1 - p) ** 3            # ease-out：起步快，收尾稳
+            cur = off * (1 - e)
+            delta = cur - prev
+            if abs(delta) >= 0.5:
+                for i in targets:
+                    self.cv.move(i, delta, 0)
+            if p < 1.0:
+                self._slide_job = self.root.after(14, tick)
+            else:
+                self._slide_job = None
+
+        tick()
+
+    def _on_keypress(self, ev) -> str | None:
+        """键盘切换：方向键翻页/选语言，Enter 继续，数字键直达，Esc 返回。"""
+        key = str(ev.keysym)
+        page = self.page
+        if page == "guide":
+            if self._guide_step < 0:
+                codes = [c for c, _ in i18n.LANGS]
+                if key in ("Left", "Right"):
+                    try:
+                        i = codes.index(i18n.get_lang())
+                    except ValueError:
+                        i = 0
+                    step = 1 if key == "Right" else -1
+                    self._lang_choose(codes[(i + step) % len(codes)])
+                    return "break"
+                if key in ("1", "2", "3", "4"):
+                    self._lang_choose(codes[int(key) - 1])
+                    return "break"
+                if key in ("Return", "KP_Enter", "space"):
+                    self._lang_continue()
+                    return "break"
+                return None
+            last = len(self.GUIDE_STEPS) - 1
+            if key in ("Left", "Escape"):
+                if self._guide_step > 0:
+                    self._guide_go(self._guide_step - 1)
+                return "break"
+            if key in ("Right", "Return", "KP_Enter", "space"):
+                if self._guide_step >= last:
+                    self._guide_finish()
+                else:
+                    self._guide_go(self._guide_step + 1)
+                return "break"
+            return None
+        if page == "settings":
+            keys = [k for k, _, _ in self.SETTING_TABS]
+            if key in ("Up", "Down"):
+                try:
+                    i = keys.index(self._set_tab)
+                except ValueError:
+                    i = 0
+                i = (i + (1 if key == "Down" else -1)) % len(keys)
+                self._set_tab_to(keys[i])
+                return "break"
+            if key in ("1", "2", "3", "4"):
+                i = int(key) - 1
+                if i < len(keys):
+                    self._set_tab_to(keys[i])
+                return "break"
+            if key == "Escape":
+                self._open_main()
+                return "break"
+            return None
+        if page == "plugins" and key == "Escape":
+            self._open_main()
+            return "break"
+        return None
 
     @staticmethod
     def _mix(a: str, b: str, k: float) -> str:
@@ -1605,13 +1945,15 @@ class Panel:
             self.root.focus_set()
         except Exception:
             pass
-        self._schedule_redraw()
+        self.redraw()
+        self._slide_in(1)
 
     def _open_main(self) -> None:
         self.page = "main"
         if self.dash:
             self.dash.hide()
-        self._schedule_redraw()
+        self.redraw()
+        self._slide_in(-1)
 
     # ------------------------------------------------------------ 动作
     def _bg(self, label, fn) -> None:
@@ -1684,17 +2026,29 @@ class Panel:
             icon_path = Path(core.APP_DIR) / "tools" / "bot.ico"
             img = Image.open(icon_path) if icon_path.exists() else Image.new("RGB", (64, 64), ACCENT)
             menu = pystray.Menu(
-                pystray.MenuItem("显示面板", self._tray_show, default=True),
-                pystray.MenuItem("启动", lambda: self._post(self.start_all)),
-                pystray.MenuItem("全部停止", lambda: self._post(self.stop_all)),
-                pystray.MenuItem("热重启 AstrBot", lambda: self._post(self.hot_restart)),
+                pystray.MenuItem(i18n.t("显示面板"), self._tray_show, default=True),
+                pystray.MenuItem(i18n.t("启动"), lambda: self._post(self.start_all)),
+                pystray.MenuItem(i18n.t("全部停止"), lambda: self._post(self.stop_all)),
+                pystray.MenuItem(i18n.t("热重启 AstrBot"), lambda: self._post(self.hot_restart)),
                 pystray.Menu.SEPARATOR,
-                pystray.MenuItem("退出", lambda: self._post(self.quit)),
+                pystray.MenuItem(i18n.t("退出"), lambda: self._post(self.quit)),
             )
-            self.tray = pystray.Icon("dafeiyu_panel", img, "大肥鱼控制台", menu)
+            self.tray = pystray.Icon("dafeiyu_panel", img,
+                                     i18n.t("大肥鱼控制台"), menu)
             threading.Thread(target=self.tray.run, daemon=True).start()
         except Exception:
             self.tray = None
+
+    def _rebuild_tray(self) -> None:
+        """切换语言后重建托盘菜单与图标提示。"""
+        old = getattr(self, "tray", None)
+        if old is not None:
+            try:
+                old.stop()
+            except Exception:
+                pass
+            self.tray = None
+        self._start_tray()
 
     def _post(self, fn) -> None:
         """从任意线程安全地回到 UI 线程。"""
@@ -1767,7 +2121,8 @@ class Panel:
             self.root.focus_set()
         except Exception:
             pass
-        self._schedule_redraw()
+        self.redraw()
+        self._slide_in(1)
         self._load_plugins(quiet=True)
 
     def _load_plugins(self, quiet: bool = False) -> None:
@@ -2059,7 +2414,7 @@ class Panel:
     def _ask_close(self) -> None:
         s = self.scale()
         dlg = tk.Toplevel(self.root)
-        dlg.title("关闭大肥鱼控制台")
+        dlg.title(i18n.t("关闭大肥鱼控制台"))
         dlg.configure(bg=CARD)
         dlg.resizable(False, False)
         w, h = round(360 * s), round(206 * s)
@@ -2070,15 +2425,15 @@ class Panel:
         dlg.transient(self.root)
         dlg.grab_set()
 
-        tk.Label(dlg, text="要关掉面板，还是留它在后台？", bg=CARD, fg=TEXT,
+        tk.Label(dlg, text=i18n.t("要关掉面板，还是留它在后台？"), bg=CARD, fg=TEXT,
                  font=("Segoe UI Variable Text", -round(12.5 * s)), anchor="w").pack(
             fill="x", padx=round(18 * s), pady=(round(16 * s), round(4 * s)))
-        tk.Label(dlg, text="关掉面板不会停机器人，AstrBot / SnowLuma 会继续运行。",
+        tk.Label(dlg, text=i18n.t("关掉面板不会停机器人，AstrBot / SnowLuma 会继续运行。"),
                  bg=CARD, fg=SUB, font=("Segoe UI Variable Text", -round(10 * s)),
                  anchor="w").pack(fill="x", padx=round(18 * s))
 
         remember = tk.BooleanVar(value=False)
-        tk.Checkbutton(dlg, text="记住这个选择", variable=remember, bg=CARD, fg=SUB,
+        tk.Checkbutton(dlg, text=i18n.t("记住这个选择"), variable=remember, bg=CARD, fg=SUB,
                        activebackground=CARD, activeforeground=SUB, selectcolor=CARD,
                        bd=0, highlightthickness=0,
                        font=("Segoe UI Variable Text", -round(10 * s))).pack(
@@ -2104,8 +2459,8 @@ class Panel:
             dlg.destroy()
             self._to_tray() if action == "tray" else self.quit()
 
-        make("最小化到后台", ACCENT, "#FFFFFF", lambda: finish("tray"), 0)
-        make("直接关闭", CHIP, TEXT, lambda: finish("quit"), 1)
+        make(i18n.t("最小化到后台"), ACCENT, "#FFFFFF", lambda: finish("tray"), 0)
+        make(i18n.t("直接关闭"), CHIP, TEXT, lambda: finish("quit"), 1)
         dlg.protocol("WM_DELETE_WINDOW", dlg.destroy)  # 点 X 只是取消，不关主窗口
 
     def quit(self) -> None:

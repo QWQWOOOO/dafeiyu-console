@@ -584,6 +584,57 @@ def scan_plugins() -> list[dict]:
     return out
 
 
+def scan_bot_entities() -> list[dict]:
+    """只读扫描已有的机器人实体：SnowLuma 已登录的 QQ 号 + AstrBot 平台账号。
+
+    只读文件，不写 AstrBot / SnowLuma 的任何配置。
+    """
+    out: list[dict] = []
+    seen: set = set()
+
+    # SnowLuma：config/onebot_<QQ>.json 一个文件就是一个已登录的机器人
+    try:
+        cfg_dir = Path(PATHS.get("snowluma_dir") or "") / "config"
+        for f in sorted(cfg_dir.glob("onebot_*.json")):
+            uin = f.stem.split("_", 1)[-1].strip()
+            if not uin.isdigit() or ("snowluma", uin) in seen:
+                continue
+            seen.add(("snowluma", uin))
+            out.append({
+                "uin": uin,
+                "source": "SnowLuma",
+                "source_key": "snowluma",
+                "detail": str(f),
+                "enabled": True,
+            })
+    except Exception:
+        pass
+
+    # AstrBot：data/cmd_config.json 的 platform 列表
+    try:
+        cfg_path = Path(PATHS.get("astrbot_dir") or "") / "data" / "cmd_config.json"
+        data = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
+        for p in data.get("platform") or []:
+            pid = str(p.get("id") or p.get("type") or "platform")
+            if ("astrbot", pid) in seen:
+                continue
+            seen.add(("astrbot", pid))
+            out.append({
+                "uin": "",
+                "source": "AstrBot",
+                "source_key": "astrbot",
+                "platform": pid,
+                "enabled": bool(p.get("enable", True)),
+                "detail": str(cfg_path),
+            })
+    except Exception:
+        pass
+
+    out.sort(key=lambda x: (x.get("source") != "SnowLuma",
+                            x.get("uin") or x.get("platform") or ""))
+    return out
+
+
 def _pip_requirements(plugin_dir: Path) -> tuple[bool, str]:
     req = plugin_dir / "requirements.txt"
     if not req.exists():

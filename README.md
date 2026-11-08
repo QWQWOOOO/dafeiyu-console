@@ -16,12 +16,15 @@
 
 1. **管进程**：一键启动 / 全部停止 / 热重启 AstrBot / 重启协议端，状态卡实时显示三个组件（AstrBot、SnowLuma、QQ）的进程号和运行状态。
 2. **嵌面板**：把 AstrBot 的 WebUI 直接嵌进右侧卡片（Windows 原生窗口嵌入，不是 iframe），鼠标键盘都能用，登录一次长期有效；AstrBot 没启动时只显示「等待启动」，不会偷偷开浏览器进程。
-3. **带新手走一遍**：首次启动自动进入四步向导——检查组件 → 启动服务 → 扫码登录 QQ → 连接机器人，缺组件可以一键下载（AstrBot / SnowLuma 自动装，QQ 跳官方下载页）。
+3. **带新手走一遍**：首次启动先选界面语言，再进入四步向导——检查组件 → 启动服务 → 扫码登录 QQ → 连接机器人，缺组件可以一键下载（AstrBot / SnowLuma 自动装，QQ 跳官方下载页）。
 
 ### 功能
 
 - 一键启停、热重启、状态与日志面板
 - 内嵌 AstrBot Dashboard（可交互、跟随深浅色主题、随窗口缩放）
+- 界面四语言：日本語 / English / 简体中文 / 繁體中文，首次启动即可选择，设置 → 外观随时切换
+- 键盘操作：欢迎页 ← → 选语言、Enter 继续；引导与设置用方向键 / Enter / Esc 翻页，页面切换带 0.17 秒滑入动画
+- 欢迎页自动扫描已登录的机器人账号（SnowLuma 与 AstrBot），只读记录，不改动机器人配置
 - 首次启动新手引导（含 SnowLuma 访问令牌在哪找、AstrBot aiocqhttp 怎么填）
 - 缺少组件自动下载安装（GitHub 直连失败自动走镜像）
 - 插件体检：按清单检查必要插件，区分已安装 / 需修复 / 未安装，支持单个修复与一键安装
@@ -89,12 +92,15 @@ docs/                截图与使用说明
 
 1. **Process control** — one-click start / stop-all / hot-restart AstrBot / restart the protocol backend, with a live status card (process id + state) for AstrBot, SnowLuma and QQ.
 2. **Embedded dashboard** — the real AstrBot WebUI is embedded into the right-hand card as a native Windows child window (not an iframe). Mouse and keyboard work, the login session persists, and nothing is spawned while AstrBot is stopped (the card just says “waiting to start”).
-3. **First-run guide** — a four-step wizard: check components → start services → scan the QR code to log in QQ → connect the bot. Missing components can be installed in one click (AstrBot / SnowLuma downloaded automatically, QQ opens its official download page).
+3. **First-run guide** — pick an interface language first, then the four-step wizard: check components → start services → scan the QR code to log in QQ → connect the bot. Missing components can be installed in one click (AstrBot / SnowLuma downloaded automatically, QQ opens its official download page).
 
 ### Features
 
 - One-click start/stop, hot restart, status and log panel
 - Embedded AstrBot dashboard (interactive, follows light/dark theme, resizes with the window)
+- Four interface languages — 日本語 / English / 简体中文 / 繁體中文 — picked on first launch, changeable later in Settings → Appearance
+- Keyboard control: arrows + Enter on the welcome page; arrows / Enter / Esc in the guide and settings, with a 0.17s slide transition
+- The welcome page lists bot accounts already signed in to SnowLuma / AstrBot (read-only; no bot files are modified)
 - First-run onboarding, including where to find the SnowLuma access token and how to configure AstrBot's aiocqhttp adapter
 - Automatic component download (falls back to GitHub mirrors when direct access fails)
 - Plugin health check: installed / needs repair / missing, single repair and “install all missing”
